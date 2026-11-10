@@ -10,22 +10,20 @@
  *   2. Written to AuditLog
  *   3. Returned as the BullMQ job return value (readable via job.returnvalue)
  */
-import crypto from 'crypto';
-import { Worker, Job } from 'bullmq';
-import mongoose from 'mongoose';
-import { env } from '../config/env';
-import Vote from '../models/Vote';
-import RegisteredVoter from '../models/RegisteredVoter';
-import Election from '../models/Election';
-import { logAction } from '../services/audit.service';
-import { AUDIT_ACTIONS } from '../config/constants';
-import type { IntegrityCheckJobData, IntegrityCheckJobResult } from './integrityCheck.queue';
-
-const connection = {
-  host:     env.REDIS_HOST,
-  port:     parseInt(env.REDIS_PORT, 10),
-  password: env.REDIS_PASSWORD,
-};
+import crypto from "crypto";
+import { Worker, Job } from "bullmq";
+import mongoose from "mongoose";
+import { env } from "../config/env";
+import { bullMQConnection } from "../config/redis";
+import Vote from "../models/Vote";
+import RegisteredVoter from "../models/RegisteredVoter";
+import Election from "../models/Election";
+import { logAction } from "../services/audit.service";
+import { AUDIT_ACTIONS } from "../config/constants";
+import type {
+  IntegrityCheckJobData,
+  IntegrityCheckJobResult,
+} from "./integrityCheck.queue";
 
 async function processIntegrityCheck(
   job: Job<IntegrityCheckJobData, IntegrityCheckJobResult>
@@ -39,22 +37,23 @@ async function processIntegrityCheck(
   const tamperedIds: string[] = [];
 
   // Stream documents one at a time — O(1) heap regardless of collection size
-  const cursor = Vote
-    .find({ electionId: election._id })
-    .select('electionId officeId candidateId confirmationChoice voteHash createdAt')
+  const cursor = Vote.find({ electionId: election._id })
+    .select(
+      "electionId officeId candidateId confirmationChoice voteHash createdAt"
+    )
     .lean()
     .cursor();
 
   let processed = 0;
   for await (const vote of cursor) {
-    const choiceKey    = vote.candidateId?.toString() ?? vote.confirmationChoice ?? '';
+    const choiceKey = vote.candidateId?.toString() ?? vote.confirmationChoice ?? "";
     const expectedHash = crypto
-      .createHash('sha256')
+      .createHash("sha256")
       .update(
         `${vote.electionId.toString()}${vote.officeId.toString()}` +
-        `${choiceKey}${vote.createdAt.toISOString()}${env.VOTE_HASH_SECRET}`
+          `${choiceKey}${vote.createdAt.toISOString()}${env.VOTE_HASH_SECRET}`
       )
-      .digest('hex');
+      .digest("hex");
 
     if (expectedHash === vote.voteHash) {
       intact++;
@@ -77,23 +76,28 @@ async function processIntegrityCheck(
   };
 
   // Integrity check: every voter marked hasVoted:true must have at least one Vote document
-  const voterCount = await RegisteredVoter.countDocuments({ electionId: election._id, hasVoted: true });
-  const voteCount  = await Vote.countDocuments({ electionId: election._id });
+  const voterCount = await RegisteredVoter.countDocuments({
+    electionId: election._id,
+    hasVoted: true,
+  });
+  const voteCount = await Vote.countDocuments({ electionId: election._id });
 
   if (voteCount < voterCount) {
     console.error(
-      `[integrity] ⚠️ MISMATCH electionId=${electionId} | voters with hasVoted=true: ${voterCount} | vote documents: ${voteCount} | missing: ${voterCount - voteCount}`
+      `[integrity] ⚠️ MISMATCH electionId=${electionId} | voters with hasVoted=true: ${voterCount} | vote documents: ${voteCount} | missing: ${
+        voterCount - voteCount
+      }`
     );
     await logAction({
       action:      AUDIT_ACTIONS.INTEGRITY_CHECK_RUN,
       performedBy: new mongoose.Types.ObjectId(requestedBy),
       targetId:    election._id,
-      targetModel: 'Election',
+      targetModel: "Election",
       metadata: {
-        type: 'INTEGRITY_CHECK_FAILED',
+        type:       "INTEGRITY_CHECK_FAILED",
         voterCount,
         voteCount,
-        delta: voterCount - voteCount,
+        delta:      voterCount - voteCount,
       },
     });
   }
@@ -109,7 +113,7 @@ async function processIntegrityCheck(
     action:      AUDIT_ACTIONS.INTEGRITY_CHECK_RUN,
     performedBy: new mongoose.Types.ObjectId(requestedBy),
     targetId:    election._id,
-    targetModel: 'Election',
+    targetModel: "Election",
     metadata: {
       totalVotes: result.totalVotes,
       intact:     result.intact,
@@ -121,25 +125,31 @@ async function processIntegrityCheck(
 }
 
 // Export factory so server.ts can start/stop the worker during bootstrap/shutdown
-export function createIntegrityCheckWorker() {
+export function createIntegrityCheckWorker(): Worker<
+  IntegrityCheckJobData,
+  IntegrityCheckJobResult
+> {
   const worker = new Worker<IntegrityCheckJobData, IntegrityCheckJobResult>(
-    'integrity-check',
+    "integrity-check",
     processIntegrityCheck,
     {
-      connection,
+      connection:  bullMQConnection,
       concurrency: 1, // one integrity job at a time — CPU-bound hash loop
     }
   );
 
-  worker.on('completed', (job, result) => {
+  worker.on("completed", (job, result) => {
     console.log(
       `[integrity-worker] job ${job.id} done — ` +
-      `${result.intact}/${result.totalVotes} intact, ${result.tampered} tampered`
+        `${result.intact}/${result.totalVotes} intact, ${result.tampered} tampered`
     );
   });
 
-  worker.on('failed', (job, err) => {
-    console.error(`[integrity-worker] job ${job?.id} failed:`, err.message);
+  worker.on("failed", (job, err) => {
+    console.error(
+      `[integrity-worker] job ${job?.id} failed:`,
+      err.message
+    );
   });
 
   return worker;

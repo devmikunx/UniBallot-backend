@@ -1,5 +1,5 @@
-import { Queue } from 'bullmq';
-import { env } from '../../config/env';
+import { Queue } from "bullmq";
+import { bullMQConnection } from "../../config/redis";
 
 export interface EmailJobData {
   to:      string;
@@ -8,35 +8,31 @@ export interface EmailJobData {
   jobId:   string;
 }
 
-const connection = {
-  host: env.REDIS_HOST,
-  port: Number(env.REDIS_PORT),
-  password: env.REDIS_PASSWORD || undefined,
-};
+console.log(
+  `[email-queue] Initializing queues | redis=${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`
+);
 
-console.log(`[email-queue] Initializing queues | redis=${env.REDIS_HOST}:${env.REDIS_PORT}`);
-
-export const emailQueue = new Queue<EmailJobData>('email-main', {
-  connection,
+export const emailQueue = new Queue<EmailJobData>("email-main", {
+  connection: bullMQConnection,
   defaultJobOptions: {
     removeOnComplete: 100,
     removeOnFail:     200,
   },
 });
 
-export const emailRetryQueue = new Queue<EmailJobData>('email-retry', {
-  connection,
+export const emailRetryQueue = new Queue<EmailJobData>("email-retry", {
+  connection: bullMQConnection,
   defaultJobOptions: {
     removeOnComplete: 100,
     removeOnFail:     200,
   },
 });
 
-emailQueue.on('error', (err) =>
-  console.error('[email-main queue] ❌ Queue error:', err.message)
+emailQueue.on("error", (err) =>
+  console.error("[email-main queue] ❌ Queue error:", err.message)
 );
-emailRetryQueue.on('error', (err) =>
-  console.error('[email-retry queue] ❌ Queue error:', err.message)
+emailRetryQueue.on("error", (err) =>
+  console.error("[email-retry queue] ❌ Queue error:", err.message)
 );
 
-console.log('[email-queue] ✅ email-main and email-retry queues initialized');
+console.log("[email-queue] ✅ email-main and email-retry queues initialized");
