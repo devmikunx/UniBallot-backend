@@ -16,17 +16,21 @@ export interface IElection extends Document {
   membersLocked:     boolean;
   published:         boolean;
   results?:          OfficeTally[] | null;
-  // Integrity check result — written by the BullMQ worker
   integrityResult?:    IntegrityCheckJobResult | null;
   integrityCheckedAt?: Date | null;
   createdAt:           Date;
   updatedAt:           Date;
+  electionMode:     'standard' | 'anonymous';
+  createdByPublic?: Types.ObjectId;
+  resultsPublic:    boolean;
+  resultsToken?:    string;
 }
 
 const candidateTallySchema = new Schema<CandidateTally>({
   candidateId: { type: String, required: true },
   fullName:    { type: String, required: true },
   voteCount:   { type: Number, required: true, min: 0 },
+  photoUrl:    { type: String, default: null },
 }, { _id: false });
 
 const officeTallySchema = new Schema<OfficeTally>({
@@ -45,7 +49,7 @@ const officeTallySchema = new Schema<OfficeTally>({
 
 const electionSchema = new Schema<IElection>(
   {
-    associationId:     { type: Schema.Types.ObjectId, ref: 'Association', required: true },
+    associationId:     { type: Schema.Types.ObjectId, ref: 'Association', required: false },
     title:             { type: String, required: true, trim: true },
     description:       { type: String },
     electionCode:      { type: String, required: true, unique: true, uppercase: true },
@@ -56,11 +60,16 @@ const electionSchema = new Schema<IElection>(
     membersLocked:     { type: Boolean, default: false },
     published:         { type: Boolean, default: false },
     results:           { type: [officeTallySchema], default: [] },
-    // Written by integrityCheck.worker.ts after job completes
     integrityResult:    { type: Schema.Types.Mixed, default: null },
     integrityCheckedAt: { type: Date },
+    electionMode:    { type: String, enum: ['standard', 'anonymous'], default: 'standard', required: true },
+    createdByPublic: { type: Schema.Types.ObjectId, ref: 'User' },
+    resultsPublic:   { type: Boolean, default: false },
+    resultsToken:    { type: String },
   },
   { timestamps: true }
 );
+
+electionSchema.index({ resultsToken: 1 }, { unique: true, sparse: true });
 
 export default mongoose.model<IElection>('Election', electionSchema);

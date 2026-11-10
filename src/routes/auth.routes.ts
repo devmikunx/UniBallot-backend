@@ -15,24 +15,25 @@ import {
   login,        loginSchema,
   refresh,      refreshSchema,
   logout,
+  registerPublicCreator,
+  registerPublicCreatorSchema,
 } from '../controllers/auth.controller';
 import { changeOwnPasswordSchema, changeOwnPassword } from '../controllers/superAdmin.controller';
 
 const router = Router();
 
-router.post('/register',    registrationLimiter, validate(registerSchema),    register);
-router.post('/verify-otp',  otpLimiter,          validate(verifyOtpSchema),   verifyOtp);
-router.post('/resend-otp',  otpLimiter,          validate(resendOtpSchema),   resendOtp);
-
+router.post('/register',         registrationLimiter, validate(registerSchema),                register);
+router.post('/register/public',  registrationLimiter, validate(registerPublicCreatorSchema),   registerPublicCreator);
+router.post('/verify-otp',       otpLimiter,          validate(verifyOtpSchema),               verifyOtp);
+router.post('/resend-otp',       otpLimiter,          validate(resendOtpSchema),               resendOtp);
 
 router.patch(
   '/change-password',
-  authenticate,                        // must be logged in
+  authenticate,
   validate(changeOwnPasswordSchema),
   changeOwnPassword,
 );
 
-// GET — query param validation uses 'query' source
 router.get('/otp-status',   otpLimiter,          validate(otpStatusSchema, 'query'), otpStatus);
 
 router.post('/login',    loginLimiter,           validate(loginSchema),       login);

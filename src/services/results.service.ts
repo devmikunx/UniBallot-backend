@@ -1,4 +1,3 @@
-
 import type { Types } from 'mongoose';
 import Office from '../models/Office';
 import Candidate from '../models/Candidate';
@@ -9,6 +8,7 @@ export interface CandidateTally {
   candidateId: string;
   fullName:    string;
   voteCount:   number;
+  photoUrl?:   string | null;
 }
 
 export interface OfficeTally {
@@ -69,7 +69,7 @@ export async function computeTally(
         isTie:       false,
         winner:      null,
         elected:     null,
-        candidates:  candidates.map((c) => ({ candidateId: c._id.toString(), fullName: c.fullName, voteCount: 0 })),
+        candidates:  candidates.map((c) => ({ candidateId: c._id.toString(), fullName: c.fullName, voteCount: 0, photoUrl: c.photoUrl ?? null })),
       });
       continue;
     }
@@ -91,13 +91,13 @@ export async function computeTally(
         elected:     isTie ? null : approveCount > rejectCount,
         approveCount,
         rejectCount,
-        candidates: [{ candidateId: candidates[0]._id.toString(), fullName: candidates[0].fullName, voteCount: totalVotes }],
+        candidates: [{ candidateId: candidates[0]._id.toString(), fullName: candidates[0].fullName, voteCount: totalVotes, photoUrl: candidates[0].photoUrl ?? null }],
       });
     } else {
       // Competitive ballot
-      const countMap: Record<string, { fullName: string; count: number }> = {};
+      const countMap: Record<string, { fullName: string; count: number; photoUrl?: string | null }> = {};
       for (const c of candidates) {
-        countMap[c._id.toString()] = { fullName: c.fullName, count: 0 };
+        countMap[c._id.toString()] = { fullName: c.fullName, count: 0, photoUrl: c.photoUrl ?? null };
       }
       for (const v of votes) {
         if (v.candidateId) {
@@ -107,7 +107,7 @@ export async function computeTally(
       }
 
       const sorted = Object.entries(countMap)
-        .map(([id, data]) => ({ candidateId: id, fullName: data.fullName, voteCount: data.count }))
+        .map(([id, data]) => ({ candidateId: id, fullName: data.fullName, voteCount: data.count, photoUrl: data.photoUrl ?? null }))
         .sort((a, b) => b.voteCount - a.voteCount);
 
       const isTie = sorted.length >= 2 && sorted[0].voteCount === sorted[1].voteCount;

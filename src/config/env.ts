@@ -34,7 +34,7 @@ const envSchema = z.object({
   // ─── Redis (BullMQ) ───────────────────────────────────────
   REDIS_HOST:            z.string().min(1, 'REDIS_HOST is required'),
   REDIS_PORT:            z.string().regex(/^\d+$/, 'REDIS_PORT must be a number'),
-  REDIS_PASSWORD:        z.string().min(1, 'REDIS_PASSWORD is required'),
+  REDIS_PASSWORD:        z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

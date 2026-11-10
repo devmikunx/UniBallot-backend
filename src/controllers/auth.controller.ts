@@ -15,8 +15,6 @@ import { getCachedUser, setCachedUser, invalidateCachedUser, CachedUser } from "
 import type { IUser } from "../models/User";
 import { sanitizeUser } from "../utils/sanitize";
 
-// ── Zod schemas ───────────────────────────────────────────────────────────────
-
 const funaabStudentEmail = z
   .string()
   .regex(
@@ -51,16 +49,10 @@ export const otpStatusSchema = z.object({
   email: funaabStudentEmail,
 });
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
-
 export const register = asyncHandler(async (req: Request, res: Response) => {
   const { email, password } = req.body as z.infer<typeof registerSchema>;
   const normalised = email.toLowerCase();
 
-  // ── OTP_SKIP MODE ──────────────────────────────────────────────────────────
-  // OTP email verification is temporarily disabled to stay within Resend's
-  // free-tier limit (100 emails/day). Accounts are created immediately.
-  // To re-enable OTP: remove this block and uncomment the OTP block below.
   const existing = await User.findOne({ email: normalised });
   if (existing) throw new AppError(409, 'An account with this email already exists');
 
@@ -91,33 +83,12 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
     'Account created successfully',
     201,
   );
-  // ── END OTP_SKIP MODE ──────────────────────────────────────────────────────
-
-  // ── OTP MODE (re-enable when Resend limit is lifted) ──────────────────────
-  // const [existingUser, otpStatusResult] = await Promise.all([
-  //   User.findOne({ email: normalised }),
-  //   otpService.getOtpStatus(normalised),
-  // ]);
-  // if (existingUser) throw new AppError(409, 'An account with this email already exists');
-  // if (otpStatusResult.exists && !otpStatusResult.expired && !otpStatusResult.locked) {
-  //   throw new AppError(409, 'A verification code was already sent to this email.', 'OTP_ALREADY_SENT');
-  // }
-  // const passwordHash = await bcrypt.hash(password, 10);
-  // const result = await otpService.createOtpRecord(normalised, passwordHash);
-  // if (result.reused) {
-  //   throw new AppError(409, 'A verification code was already sent to this email.', 'OTP_ALREADY_SENT');
-  // }
-  // const template = emailService.otpEmailTemplate(result.otp);
-  // await emailService.sendEmail({ to: normalised, ...template });
-  // return sendSuccess(res, null, 'Check your email for a verification code', 201);
-  // ── END OTP MODE ───────────────────────────────────────────────────────────
 });
 
 export const resendOtp = asyncHandler(async (req: Request, res: Response) => {
   const { email } = req.body as z.infer<typeof resendOtpSchema>;
   const normalised = email.toLowerCase();
 
-  // Run both checks in parallel
   const [existing, newOtp] = await Promise.all([
     User.findOne({ email: normalised }).lean(),
     otpService.resendOtp(normalised).catch((err) => { throw err; }),
@@ -153,10 +124,6 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
   const { email, otp } = req.body as z.infer<typeof verifyOtpSchema>;
   const normalised = email.toLowerCase();
 
-  // FIX: read OTP session from Redis — that is where createOtpRecord() wrote it.
-  // The old code called OtpVerification.findOne() (MongoDB) which was always
-  // empty because the service never writes there, causing "No pending
-  // verification for this email" on every verify attempt.
   const record = await otpService.getOtpRecord(normalised);
   if (!record)
     throw new AppError(
@@ -181,7 +148,6 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
     );
   }
 
-  // Acquire Redis mutex to prevent concurrent OTP verification for the same email
   const lockKey   = `otp-verify-lock:${normalised}`;
   const lockValue = crypto.randomUUID();
   const acquired  = await otpService.acquireVerifyLock(lockKey, lockValue);
@@ -194,7 +160,6 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
     if (!valid) {
       await otpService.incrementAttempts(normalised);
 
-      // FIX: re-read updated attempt count from Redis, not MongoDB.
       const updated = await otpService.getOtpRecord(normalised);
       if (updated?.locked) {
         throw new AppError(
@@ -222,7 +187,6 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
       );
     }
 
-    // FIX: delete from Redis (source of truth), not MongoDB.
     await otpService.deleteOtpRecord(normalised);
 
     const user = await User.create({
@@ -243,7 +207,6 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
     const refreshToken = tokenService.signRefreshToken(user._id.toString());
     await tokenService.storeRefreshToken(user._id.toString(), refreshToken);
 
-    // Populate cache so the first authenticated request is a cache hit
     await setCachedUser(user);
 
     sendSuccess(
@@ -257,7 +220,6 @@ export const verifyOtp = asyncHandler(async (req: Request, res: Response) => {
       201,
     );
   } finally {
-    // Release lock only if we still own it
     await otpService.releaseVerifyLock(lockKey, lockValue);
   }
 });
@@ -266,7 +228,6 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const { email, password } = req.body as z.infer<typeof loginSchema>;
   const normalised = email.toLowerCase();
 
-  // .lean() is intentional — faster read, no document methods needed here
   const user = await User.findOne({ email: normalised }).select('+passwordHash').lean();
   if (!user) {
     await bcrypt.compare(password, '$2b$10$timingsafetyplaceholderXXXXXXXXXXXXXXXXXXXXXXXXXX');
@@ -282,7 +243,6 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   const refreshToken = tokenService.signRefreshToken(user._id.toString());
   await tokenService.storeRefreshToken(user._id.toString(), refreshToken);
 
-  // ✅ No longer errors — setCachedUser now accepts lean objects
   await setCachedUser(user);
 
   sendSuccess(
@@ -304,11 +264,10 @@ export const refresh = asyncHandler(async (req: Request, res: Response) => {
 
   let user: IUser | CachedUser | null = await getCachedUser(payload.userId);
   if (!user) {
-    // ✅ Remove the lying .lean<IUser>() generic — just use plain .lean()
     const dbUser = await User.findById(payload.userId).lean();
     if (!dbUser) throw new AppError(401, "User not found");
-    await setCachedUser(dbUser); // ✅ accepted cleanly now
-    user = dbUser as unknown as CachedUser; // safe: same shape, cache path only
+    await setCachedUser(dbUser);
+    user = dbUser as unknown as CachedUser;
   }
 
   if (!user.isActive)   throw new AppError(403, "Account deactivated");
@@ -328,8 +287,45 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
   const { refreshToken } = req.body as { refreshToken?: string };
   if (refreshToken) await tokenService.revokeRefreshToken(refreshToken);
 
-  // Bust cache so the next request re-reads from DB
   if (req.user) await invalidateCachedUser(req.user._id.toString());
 
   sendSuccess(res, null, "Logged out successfully");
+});
+
+export const registerPublicCreatorSchema = z.object({
+  email:    z.string().email(),
+  password: z.string().min(8),
+  fullName: z.string().min(2),
+});
+
+export const registerPublicCreator = asyncHandler(async (req: Request, res: Response) => {
+  const { email, password, fullName } = req.body as z.infer<typeof registerPublicCreatorSchema>;
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const existing = await User.findOne({ email: normalizedEmail });
+  if (existing) throw new AppError(409, 'An account with this email already exists');
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = await User.create({
+    email:            normalizedEmail,
+    passwordHash,
+    role:             'public_creator',
+    fullName:         fullName.trim(),
+    profileCompleted: true,
+    isActive:         true,
+  });
+
+  await logAction({
+    action:      AUDIT_ACTIONS.PUBLIC_CREATOR_REGISTERED,
+    performedBy: user._id,
+    targetId:    user._id,
+    targetModel: 'User',
+  });
+
+  const accessToken  = tokenService.signAccessToken(user._id.toString());
+  const refreshToken = tokenService.signRefreshToken(user._id.toString());
+  await tokenService.storeRefreshToken(user._id.toString(), refreshToken);
+  await setCachedUser(user);
+
+  sendSuccess(res, { accessToken, refreshToken, user: sanitizeUser(user) }, 'Account created', 201);
 });

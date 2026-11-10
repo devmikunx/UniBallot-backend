@@ -12,7 +12,6 @@ export async function authorizeElection(
   try {
     let electionId: string | undefined = req.params.id ?? req.params.electionId;
 
-    // Resolve via officeId for candidate routes mounted at /api/offices
     if (!electionId && req.params.officeId) {
       if (!mongoose.Types.ObjectId.isValid(req.params.officeId)) {
         return next(new AppError(400, 'Invalid office ID'));
@@ -37,11 +36,15 @@ export async function authorizeElection(
       election.assignedOfficerId != null &&
       election.assignedOfficerId.toString() === user._id.toString();
 
-    if (!isSuperAdmin && !isAssignedOfficer) {
+    const isPublicCreatorOwner =
+      user.role === 'public_creator' &&
+      election.createdByPublic != null &&
+      election.createdByPublic.toString() === user._id.toString();
+
+    if (!isSuperAdmin && !isAssignedOfficer && !isPublicCreatorOwner) {
       return next(new AppError(403, 'You are not authorized for this election'));
     }
 
-    // Lockdown blocks all officer actions; Super Admin is exempt
     if (!isSuperAdmin && election.isLocked) {
       return next(new AppError(423, 'Election is in lockdown'));
     }

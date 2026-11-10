@@ -30,22 +30,19 @@ import {
   resultsPublishedOfficerTemplate,
 } from "../services/email/email.service";
 import type { IElection } from "../models/Election";
+import { env } from "../config/env";
 
-// H-08: Max concurrent elections per officer
 const MAX_OFFICER_CONCURRENT_ELECTIONS = parseInt(
   process.env.MAX_OFFICER_CONCURRENT_ELECTIONS || "3",
   10,
 );
 
 export const createElectionSchema = z.object({
-  associationId: z.string().min(1, "associationId is required"),
+  associationId: z.string().min(1).optional(),
   title: z.string().min(2),
   description: z.string().optional(),
 });
 
-/**
- * Typed aggregate result for listMyElections.
- */
 interface MyElectionResult extends Omit<IElection, "reg"> {
   hasVoted?: boolean;
   association?: { _id: string; name: string };
@@ -56,6 +53,36 @@ export const createElection = asyncHandler(
     const { associationId, title, description } = req.body as z.infer<
       typeof createElectionSchema
     >;
+
+    if (req.user.role === 'public_creator') {
+      const slug = title.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6).padStart(6, 'X');
+      let electionCode = '';
+      for (let i = 0; i < 5; i++) {
+        const candidate = slug + crypto.randomBytes(1).toString('hex').toUpperCase();
+        const clash = await Election.findOne({ electionCode: candidate });
+        if (!clash) { electionCode = candidate; break; }
+      }
+      // FIX 1: generateElectionCode is async — must be awaited
+      if (!electionCode) electionCode = await generateElectionCode();
+
+      const election = await Election.create({
+        title:           title.trim(),
+        description:     description?.trim(),
+        electionCode,
+        status:          'draft',
+        electionMode:    'anonymous',
+        createdByPublic: req.user._id,
+      });
+
+      await logAction({
+        action:      AUDIT_ACTIONS.ANON_ELECTION_CREATED,
+        performedBy: req.user._id,
+        targetId:    election._id,
+        targetModel: 'Election',
+      });
+
+      return sendSuccess(res, election, 'Anonymous election created', 201);
+    }
 
     const association = await Association.findById(associationId);
     if (!association) throw new AppError(404, "Association not found");
@@ -76,7 +103,8 @@ export const createElection = asyncHandler(
       targetModel: "Election",
     });
 
-    sendSuccess(res, election, "Election created", 201);
+    // FIX 2: missing return — without it TS sees a code path with no return value
+    return sendSuccess(res, election, "Election created", 201);
   },
 );
 
@@ -137,10 +165,12 @@ export const getElectionByCode = asyncHandler(
     if (!election) throw new AppError(404, "Election not found");
 
     sendSuccess(res, {
-      title: election.title,
-      associationName: election.associationId.name,
-      status: election.status,
-      electionCode: election.electionCode,
+      _id:             election._id,
+      title:           election.title,
+      associationName: election.associationId ? (election.associationId as { name: string }).name : null,
+      status:          election.status,
+      electionCode:    election.electionCode,
+      electionMode:    election.electionMode,
     });
   },
 );
@@ -213,7 +243,6 @@ export const assignOfficer = asyncHandler(
     if (!officer.isActive || officer.isSuspended)
       throw new AppError(400, "Officer account is not active");
 
-    // H-08: Check officer concurrent election limit
     const activeCount = await Election.countDocuments({
       assignedOfficerId: officerId,
       _id: { $ne: election._id },
@@ -238,7 +267,6 @@ export const assignOfficer = asyncHandler(
       metadata: { officerId },
     });
 
-    // Notify the officer they've been assigned to this election (fire-and-forget)
     if (officer.email && officer.fullName) {
       sendEmail({
         to: officer.email,
@@ -271,10 +299,35 @@ export const transitionStatus = asyncHandler(
         "Election is in lockdown — deactivate lockdown first",
       );
 
-    const currentIdx = ELECTION_STATUS_ORDER.indexOf(election.status);
-    const newIdx = ELECTION_STATUS_ORDER.indexOf(typedStatus);
+    const isAnon = election.electionMode === 'anonymous';
 
-    if (newIdx === currentIdx - 1) {
+    if (isAnon && ['registration_open', 'registration_closed'].includes(typedStatus)) {
+      throw new AppError(400, 'Registration steps are not valid for anonymous elections');
+    }
+    if (!isAnon && typedStatus === 'paused') {
+      throw new AppError(400, 'The paused status is only valid for anonymous elections');
+    }
+
+    // For anonymous elections, registration_open and registration_closed are
+    // skipped entirely. Build a filtered order so that index arithmetic
+    // correctly treats draft → setup → voting_open as consecutive steps.
+    // paused is excluded from the linear order — it is a side-branch off
+    // voting_open, so voting_open → paused → voting_open and
+    // paused → voting_closed must all be valid without breaking ±1 arithmetic.
+    const ANON_SKIP = ['registration_open', 'registration_closed'];
+    const LINEAR_SKIP = isAnon ? [...ANON_SKIP, 'paused'] : [];
+    const effectiveOrder = ELECTION_STATUS_ORDER.filter((s) => !LINEAR_SKIP.includes(s));
+
+    const isPauseTransition =
+      isAnon &&
+      ((election.status === 'voting_open' && typedStatus === 'paused') ||
+        (election.status === 'paused' && typedStatus === 'voting_open'));
+
+    const linearCurrent = election.status === 'paused' ? 'voting_open' : election.status;
+    const currentIdx = effectiveOrder.indexOf(linearCurrent);
+    const newIdx = effectiveOrder.indexOf(typedStatus);
+
+    if (!isPauseTransition && newIdx === currentIdx - 1) {
       if (typedStatus === "registration_open") {
         const memberCount = await AssociationMember.countDocuments({
           electionId: election._id,
@@ -285,7 +338,7 @@ export const transitionStatus = asyncHandler(
             "Cannot go back to registration_open: no members uploaded",
           );
       }
-    } else if (newIdx === currentIdx + 1) {
+    } else if (!isPauseTransition && newIdx === currentIdx + 1) {
       if (typedStatus === "registration_open") {
         const memberCount = await AssociationMember.countDocuments({
           electionId: election._id,
@@ -324,7 +377,7 @@ export const transitionStatus = asyncHandler(
           );
         }
       }
-    } else {
+    } else if (!isPauseTransition) {
       throw new AppError(
         400,
         "Status transitions are only allowed one step forward or one step backward",
@@ -340,9 +393,12 @@ export const transitionStatus = asyncHandler(
     }
 
     const updateFields: Record<string, unknown> = { status: typedStatus };
-    if (typedStatus === "voting_open") {
+    if (typedStatus === 'voting_open' && !isAnon) {
       updateFields.candidatesLocked = true;
-      updateFields.membersLocked = true;
+      updateFields.membersLocked    = true;
+    }
+    if (typedStatus === 'paused') {
+      updateFields.candidatesLocked = false;
     }
 
     const updated = await Election.findByIdAndUpdate(
@@ -361,7 +417,6 @@ export const transitionStatus = asyncHandler(
       metadata: { from: election.status, to: typedStatus },
     });
 
-    // Invalidate ballot cache so status change is reflected immediately
     await redis.del(`ballot:${election._id}`).catch(() => null);
 
     sendSuccess(res, updated, `Election status changed to ${typedStatus}`);
@@ -387,7 +442,6 @@ export const toggleLockdown = asyncHandler(
       targetId: election._id,
       targetModel: "Election",
     });
-    // Invalidate ballot cache so voting service re-reads updated isLocked state immediately
     await redis.del(`ballot:${req.params.id}`).catch(() => null);
 
     sendSuccess(res, null, `Lockdown ${active ? "activated" : "deactivated"}`);
@@ -415,8 +469,8 @@ export const registerForElection = asyncHandler(
       electionCode: electionCode.toUpperCase(),
     });
     if (!election) throw new AppError(404, "Election not found");
-   if (!["registration_open", "registration_closed" ,"voting_open"].includes(election.status))
-  throw new AppError(400, "Registration is not open for this election");
+    if (!["registration_open", "registration_closed", "voting_open"].includes(election.status))
+      throw new AppError(400, "Registration is not open for this election");
     if (election.isLocked) throw new AppError(423, "Election is in lockdown");
 
     const eligible = await AssociationMember.findOne({
@@ -454,7 +508,6 @@ export const registerForElection = asyncHandler(
       },
     });
 
-    // Fetch student details and send registration confirmation (fire-and-forget)
     User.findById(req.user._id)
       .select("email fullName")
       .lean()
@@ -509,7 +562,6 @@ export const publishResults = asyncHandler(
       );
     }
 
-    // Delete both tally caches atomically when publishing
     await Promise.all([
       redis.del(`tally:${election._id}`).catch(() => null),
       redis.del(`tally:preview:${election._id}`).catch(() => null),
@@ -526,7 +578,6 @@ export const publishResults = asyncHandler(
     const hasTies = tally.some((t) => t.isTie);
     const tiedOffices = tally.filter((t) => t.isTie).map((t) => t.officeTitle);
 
-    // Notify assigned officer that results are published (fire-and-forget)
     if (election.assignedOfficerId) {
       User.findById(election.assignedOfficerId)
         .select("email fullName")
@@ -569,9 +620,15 @@ export const getResults = asyncHandler(async (req: Request, res: Response) => {
       ).lean();
       if (!isRegistered) throw new AppError(403, "Only registered voters can view results");
 
-      // Cache for 24 hours — registrations never change after voting closes
       await redis.setEx(cacheKey, 86_400, '1').catch(() => null);
     }
+  }
+
+  if (req.user.role === "public_creator") {
+    const isOwner =
+      election.createdByPublic != null &&
+      election.createdByPublic.toString() === req.user._id.toString();
+    if (!isOwner) throw new AppError(403, "You are not authorized for this election");
   }
 
   if (election.results?.length) {
@@ -581,23 +638,19 @@ export const getResults = asyncHandler(async (req: Request, res: Response) => {
   const cached = await getCachedTally(election._id.toString());
   if (cached) return sendSuccess(res, cached);
 
-  // Mutex: only one process recomputes at a time
   const mutexKey  = `tally-computing:${election._id}`;
   const lockValue = crypto.randomUUID();
   const acquired  = await redis.set(mutexKey, lockValue, { NX: true, EX: 30 }).catch(() => null);
 
   if (!acquired) {
-    // Another process is computing — poll the cache briefly, then fall back
     await new Promise((r) => setTimeout(r, 800));
     const retried = await getCachedTally(election._id.toString());
     if (retried) return sendSuccess(res, retried);
-    // Still nothing — let this request compute too (last resort)
   }
 
   const tally = await computeTally(election._id.toString());
   await redis.setEx(`tally:${election._id}`, 3_600, JSON.stringify(tally)).catch(() => null);
 
-  // Release mutex
   if (acquired) {
     await redis.del(mutexKey).catch(() => null);
   }
@@ -909,3 +962,41 @@ export const exportResultsPdf = asyncHandler(
     });
   },
 );
+
+export const togglePublicResults = asyncHandler(async (req: Request, res: Response) => {
+  const { enable } = req.body as { enable: boolean };
+  const election = req.election!;
+
+  if (enable) {
+    if (election.status !== 'results_published') {
+      throw new AppError(400, 'Results are not published yet');
+    }
+    const token = crypto.randomBytes(16).toString('hex');
+    await Election.findByIdAndUpdate(election._id, { $set: { resultsPublic: true, resultsToken: token } });
+    await logAction({
+      action:      AUDIT_ACTIONS.RESULTS_MADE_PUBLIC,
+      performedBy: req.user._id,
+      targetId:    election._id,
+      targetModel: 'Election',
+    });
+    const origin = env.FRONTEND_ORIGIN.split(',')[0].trim();
+    return sendSuccess(res, { resultsPublic: true, publicUrl: `${origin}/results/public/${token}` });
+  }
+
+  await Election.findByIdAndUpdate(election._id, { $set: { resultsPublic: false } });
+  await logAction({
+    action:      AUDIT_ACTIONS.RESULTS_MADE_PRIVATE,
+    performedBy: req.user._id,
+    targetId:    election._id,
+    targetModel: 'Election',
+  });
+  return sendSuccess(res, { resultsPublic: false });
+});
+
+export const listCreatorElections = asyncHandler(async (req: Request, res: Response) => {
+  const elections = await Election.find({ createdByPublic: req.user._id })
+    .select('-results -integrityResult')
+    .sort({ createdAt: -1 })
+    .lean();
+  sendSuccess(res, elections, 'Elections retrieved');
+});

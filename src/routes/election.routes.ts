@@ -33,6 +33,8 @@ import {
   getOpenElections,
   exportResultsCsv,
   exportResultsPdf,
+  togglePublicResults,
+  listCreatorElections,
 } from "../controllers/election.controller";
 
 import {
@@ -65,7 +67,6 @@ import { concurrencyLimit } from "../middleware/concurrencyLimit";
 
 const router = Router();
 
-// C-06: Status transition rate limiter — 5 per minute per user per election
 const statusTransitionLimiter = rateLimit({
   windowMs: 60_000,
   max: 5,
@@ -79,7 +80,6 @@ const statusTransitionLimiter = rateLimit({
   statusCode: 429,
 });
 
-// Public — rate-limited to prevent election code brute-forcing (F-11)
 router.get("/code/:code", codeLookupLimiter, getElectionByCode);
 router.get(
   "/code/:code/results",
@@ -99,7 +99,7 @@ router.post(
 router.post(
   "/",
   authenticate,
-  authorize("super_admin"),
+  authorize("super_admin", "public_creator"),
   validate(createElectionSchema),
   createElection,
 );
@@ -111,6 +111,7 @@ router.get(
 );
 router.get("/open", publicElectionLimiter, getOpenElections);
 router.get("/my", authenticate, authorize("student"), listMyElections);
+router.get("/my-created", authenticate, authorize("public_creator"), listCreatorElections);
 
 router.get("/:id/receipt/:code", receiptLimiter, verifyReceipt);
 
@@ -124,7 +125,6 @@ router.delete(
   deleteElection,
 );
 
-// C-06: Apply status transition rate limiter
 router.patch(
   "/:id/status",
   authenticate,
@@ -225,7 +225,7 @@ router.get(
 router.get(
   "/:id/results",
   authenticate,
-  authorize("super_admin", "student"),
+  authorize("super_admin", "student", "public_creator"),
   getResults,
 );
 router.post(
@@ -261,5 +261,7 @@ router.get(
   authorize("super_admin", "officer"),
   exportResultsPdf,
 );
+
+router.patch("/:id/public-results", authenticate, authorizeElection, validate(z.object({ enable: z.boolean() })), togglePublicResults);
 
 export default router;

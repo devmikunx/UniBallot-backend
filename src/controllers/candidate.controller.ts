@@ -23,12 +23,18 @@ export const addCandidate = asyncHandler(
 
     const election = await Election.findById(office.electionId);
     if (!election) throw new AppError(404, "Election not found");
-    if (election.candidatesLocked)
-      throw new AppError(409, "Candidates are locked");
+
+    const isAnon = election.electionMode === 'anonymous';
+    const editBlocked = isAnon
+      ? ['voting_open', 'voting_closed', 'results_published'].includes(election.status)
+      : election.candidatesLocked;
+    if (editBlocked) throw new AppError(409, 'Candidates cannot be modified at this stage');
+    if (isAnon && election.status === 'paused') {
+      logAction({ action: AUDIT_ACTIONS.CANDIDATE_EDITED_DURING_PAUSE, performedBy: req.user._id, targetId: election._id, targetModel: 'Election', metadata: { action: 'candidate_added' } }).catch(() => null);
+    }
 
     const { fullName, bio } = req.body as z.infer<typeof candidateSchema>;
 
-    // Create candidate first to get its _id for the Cloudinary publicId
     const candidate = await Candidate.create({
       officeId: office._id,
       electionId: election._id,
@@ -74,8 +80,15 @@ export const updateCandidate = asyncHandler(
 
     const election = await Election.findById(candidate.electionId);
     if (!election) throw new AppError(404, "Election not found");
-    if (election.candidatesLocked)
-      throw new AppError(409, "Candidates are locked");
+
+    const isAnon = election.electionMode === 'anonymous';
+    const editBlocked = isAnon
+      ? ['voting_open', 'voting_closed', 'results_published'].includes(election.status)
+      : election.candidatesLocked;
+    if (editBlocked) throw new AppError(409, 'Candidates cannot be modified at this stage');
+    if (isAnon && election.status === 'paused') {
+      logAction({ action: AUDIT_ACTIONS.CANDIDATE_EDITED_DURING_PAUSE, performedBy: req.user._id, targetId: election._id, targetModel: 'Election', metadata: { action: 'candidate_updated' } }).catch(() => null);
+    }
 
     const { fullName, bio } = req.body as Partial<
       z.infer<typeof candidateSchema>
@@ -86,7 +99,6 @@ export const updateCandidate = asyncHandler(
     if (bio !== undefined) updateFields.bio = bio;
 
     if (req.file) {
-      // Delete old Cloudinary asset before uploading replacement
       if (candidate.photoPublicId) {
         await deleteImage(candidate.photoPublicId).catch(() => null);
       }
@@ -117,15 +129,20 @@ export const deleteCandidate = asyncHandler(
 
     const election = await Election.findById(candidate.electionId);
     if (!election) throw new AppError(404, "Election not found");
-    if (election.candidatesLocked)
-      throw new AppError(409, "Candidates are locked");
 
-    // H-02: block deletion if votes already cast for this candidate
+    const isAnon = election.electionMode === 'anonymous';
+    const editBlocked = isAnon
+      ? ['voting_open', 'voting_closed', 'results_published'].includes(election.status)
+      : election.candidatesLocked;
+    if (editBlocked) throw new AppError(409, 'Candidates cannot be modified at this stage');
+    if (isAnon && election.status === 'paused') {
+      logAction({ action: AUDIT_ACTIONS.CANDIDATE_EDITED_DURING_PAUSE, performedBy: req.user._id, targetId: election._id, targetModel: 'Election', metadata: { action: 'candidate_removed' } }).catch(() => null);
+    }
+
     const voteExists = await Vote.findOne({ candidateId: candidate._id });
     if (voteExists)
       throw new AppError(409, "Cannot delete a candidate that has votes");
 
-    // Guard: at least one candidate must remain per office
     const remainingCount = await Candidate.countDocuments({
       officeId: candidate.officeId,
     });
